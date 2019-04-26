@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <string.h>
 
 #define ERROR 1
 #define SUCCES 0
@@ -15,10 +16,18 @@
 #define minHSRDuration 0
 #define minWDuration 20
 #define minimalPierCapacity 5
+#define boatCapacity 4
+#define semBOARDING "ios-projekt2-xziska03-boarding"
+#define semCRUISE "ios-projekt2-xziska03-cruise"
+#define semUNBOARDING "ios-projekt2-xziska03-unboarding"
+#define semPIER "ios-projekt2-xziska03-pier"
+#define semMUTEX "ios-projekt2-xziska03-mutex"
+#define semCAPWAITSCREW "ios-projekt2-xziska03-captainWaitsForCrew"
 
 #define myMMAP(pointer){(pointer) = mmap(NULL, sizeof(*(pointer)), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);}
-#define mySLEEP(max_time){if(max_time != 0) sleep(rand() % max_time);}
+#define mySLEEP(max_time){if(max_time != 0) usleep(rand() % max_time);}
 #define myUNMAP(pointer){munmap((pointer), sizeof((pointer)));}
+//#define myINITSEM(semafor){(semafor) = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);}
 
 	
 FILE *outputFile;
@@ -168,11 +177,30 @@ int loadArgs(int argc, char *argv[], int *firstArg, int *secondArg, int *thirdAr
 		return ERROR;
 	}
 }
+/**
+ * [Inicializuje potrebne zdroje]
+ */
 void initialize()
 {
 	//za zapisom do suboru davat fflush LADATIPS
 	//alebo predtym na zaciatku mainu setbuf(outPoutfile, NULL);
 	//outputfile = fopen("proj2.out", "w");
+	sem_t *sem; 
+	sem = sem_open(semBOARDING, O_CREAT, 0666, 0); //INIT NA KAPACITU LODE
+	for(int i = 0; i < boatCapacity; i++){sem_post(sem);}
+    sem_close(sem);
+    sem = sem_open(semCRUISE, O_CREAT, 0666, 0);
+    sem_close(sem);
+    sem = sem_open(semUNBOARDING, O_CREAT, 0666, 0);
+    sem_close(sem);
+    sem = sem_open(semPIER, O_CREAT, 0666, 0); //INIT NA KAPACITU MOLA
+    for(int i = 0; i < minimalPierCapacity; i++){sem_post(sem);}
+   	sem_close(sem);
+    sem = sem_open(semMUTEX, O_CREAT, 0666, 0); //INIT na jednu polozku
+    sem_post(sem);
+   	sem_close(sem);
+   	sem = sem_open(semCAPWAITSCREW, O_CREAT, 0666, 0); //INIT odomkne sa pre kapitana
+    sem_close(sem);
 	myMMAP(actionNumber);
 	myMMAP(hackNumber);
 	myMMAP(serfNumber);
@@ -180,36 +208,113 @@ void initialize()
 	*hackNumber = 0;
 	*serfNumber = 0;
 }
+/**
+ * [odalokuje vsetky zdroje]
+ */
 void cleanup()
 {
 	myUNMAP(actionNumber);
 	myUNMAP(hackNumber);
 	myUNMAP(serfNumber);
+	sem_unlink(semBOARDING);
+	sem_unlink(semCRUISE);
+	sem_unlink(semUNBOARDING);
+	sem_unlink(semPIER);
+	sem_unlink(semMUTEX);
+	sem_unlink(semCAPWAITSCREW);
 }
-
-void processHacker(int hackerID)
-{
-	printf("%d\t: HACK %d\t : starts\n", *actionNumber, hackerID);
+void validateCrew(int serfID, char *processName, int sailDuration){
+	sem_t *mutex = sem_open(semMUTEX, O_RDWR);
+	sem_t *cruise = sem_open(semCRUISE, O_RDWR);
+	sem_t *waitForCrew = sem_open(semCAPWAITSCREW, O_RDWR);
+	sem_t *boarding = sem_open(semBOARDING, O_RDWR);
 
 	*actionNumber = *actionNumber + 1;
-	*hackNumber = *hackNumber + 1;
-	printf("%d\t: SERF %d\t : waits\t: %d\t: %d\n", *actionNumber, hackerID, *hackNumber, *serfNumber);
-}
-void processSerf(int serfID)
-{
-	printf("%d\t: SERF %d\t : starts\n", *actionNumber, serfID);
+	printf("%d\t: %s %d\t : boards\t: %d\t: %d\n", *actionNumber, processName, serfID, *hackNumber, *serfNumber);
+
+	mySLEEP(sailDuration);	//plavba
+	sem_post(cruise);
+	sem_wait(waitForCrew);
 
 	*actionNumber = *actionNumber + 1;
-	*serfNumber = *serfNumber + 1;
-	printf("%d\t: SERF %d\t : waits\t: %d\t: %d\n", *actionNumber, serfID, *hackNumber, *serfNumber);
+	printf("%d\t: %s %d\t : captain exits\t: %d\t: %d\n", *actionNumber, processName, serfID, *hackNumber, *serfNumber);
+	sem_post(boarding);
+	sem_post(mutex);
+
+	sem_close(boarding);
+	sem_close(waitForCrew);
+	sem_close(cruise);
+	sem_close(mutex);
+	exit(0);
 }
 
-void generateHackers(int numOfPeople, int delay)
+/**
+ * [funkcia na prevedenie procesu Serf]
+ * @param serfID [Poradove cislo Serfa]
+ */
+void processPier(int ID, char *processName, int sailDuration)
 {
+	sem_t *unboarding = sem_open(semUNBOARDING, O_RDWR);
+	sem_t *mutex = sem_open(semMUTEX, O_RDWR);
+	sem_t *waitForCrew = sem_open(semCAPWAITSCREW, O_RDWR);
+	sem_t *boarding = sem_open(semBOARDING, O_RDWR);
+
+	sem_wait(mutex);
+	if((strcmp(processName, "HACK")) == 0){	*hackNumber = *hackNumber + 1;}
+
+	if((strcmp(processName, "SERF")) == 0){ *serfNumber = *serfNumber + 1;}
+	
+	*actionNumber = *actionNumber + 1;
+	printf("%d\t: %s %d\t : waits\t: %d\t: %d\n", *actionNumber, processName, ID, *hackNumber, *serfNumber);
+
+	if(*hackNumber == 4)
+	{
+		*hackNumber = *hackNumber - 4;
+		validateCrew(ID, processName, sailDuration);
+	}
+	else if(*serfNumber == 4)
+	{
+		*serfNumber = *serfNumber - 4;
+		validateCrew(ID, processName, sailDuration);
+	}
+	else if((*serfNumber == 2) && (*hackNumber == 2))
+	{
+		*hackNumber = *hackNumber - 2;
+		*serfNumber = *serfNumber - 2;
+		validateCrew(ID, processName, sailDuration);
+	}
+	sem_wait(unboarding);
+	*actionNumber = *actionNumber + 1;
+	printf("%d\t: %s %d\t : member exits \t: %d\t: %d\n", *actionNumber, processName, ID, *hackNumber, *serfNumber);
+	if((sem_trywait(unboarding)) < 0){sem_post(waitForCrew);}
+	sem_post(boarding);
+	sem_post(mutex);
+	sem_close(boarding);
+	sem_close(waitForCrew);
+	sem_close(mutex);
+	sem_close(unboarding);
+}
+
+/**
+ * [Funkcia generuje procesy Hack]
+ * @param numOfPeople [pocet tvorenych Hackerov]
+ * @param delay       [delay medzi jednotlivymi procesmi]
+ */
+void generateProcess(int numOfPeople, int delay, char *processName, int sailDuration, int returnTime)
+{
+	sem_t *pierCap;
+	pierCap = sem_open(semPIER, O_RDWR);
+
+	sem_t *boarding;
+	boarding = sem_open(semBOARDING, O_RDWR);
+
 	pid_t generator;
 	int pid;
+
 	for(int id = 1; id <= numOfPeople; id++)
 	{
+		*actionNumber = *actionNumber + 1;
+		printf("%d\t: %s %d\t : starts\n", *actionNumber, processName, id);
 		if((pid = fork()) < 0)
 		{	//error
 			perror("fork: ");
@@ -217,47 +322,54 @@ void generateHackers(int numOfPeople, int delay)
 		}
 		if(pid == 0)
 		{
-			*actionNumber = *actionNumber + 1;
-			processHacker(id);
-			exit(0);
+			if(sem_trywait(pierCap) < 0)
+			{
+				while(1){
+					*actionNumber = *actionNumber + 1;
+					printf("%d\t: %s %d\t : leaves queue \t: %d\t: %d\n", *actionNumber, processName, id, *hackNumber, *serfNumber);
+					mySLEEP(returnTime);
+					printf("%d\t: %s %d\t : is back\n", *actionNumber, processName, id);
+					if((sem_trywait(boarding)) < 4){
+							printf("test2\n");
+						sem_wait(boarding);
+							printf("test4\n");
+						processPier(id, processName, sailDuration);
+						exit(1);
+					}
+				}
+			}
+			else
+			{	
+				sem_wait(boarding);
+				processPier(id, processName, sailDuration);
+				exit(1);
+			}
 		}
-		generator = pid;
-		mySLEEP(delay);
+		else
+		{	
+			generator = pid;
+			mySLEEP(delay);
+		}
 	}
 
 	waitpid(generator, NULL, 0);
+	sem_close(pierCap);
+	sem_close(boarding);
 }
-void generateSerfs(int numOfPeople, int delay)
-{
-	pid_t generator;
-	int pid;
-	for(int id = 1; id <= numOfPeople; id++)
-	{
-		if((pid = fork()) < 0)
-		{	//error
-			perror("fork: ");
-			exit(0);
-		}
-		if(pid == 0)
-		{
-			*actionNumber = *actionNumber + 1;
-			processSerf(id);
-			exit(0);
-		}
-		generator = pid;
-		mySLEEP(delay);
-	}
-
-	waitpid(generator, NULL, 0);
-}
-void processPier()
+/**
+ * [Molo]
+ */
+void processCruise()
 {
 //	while()
- printf("SOM V PIER POGGERS\n");
+ //	printf("SOM V PIER POGGERS\n");
+ //	sem_wait(boarding);
+//	*actionNumber = *actionNumber + 1;
+//	printf("%d\t: SERF %d\t : starts\n", *actionNumber, id);
+	//processSerf(id);
+	exit(0);	
 	
 }
-
-
 /*-----------------------------------FUNCTIONS---------------------------------------*/
 
 /*-------------------------------------MAIN------------------------------------------*/
@@ -269,19 +381,19 @@ void processPier()
  */
 int main(int argc, char *argv[])
 {
+	setbuf(stdout,NULL);
+    setbuf(stderr,NULL);
 	// spracovanie argumentov
-	int sizePersons, procTimeH, procTimeS, sailDurationR, pierReturnTime, pierCapacity;
-	int error = loadArgs(argc, argv, &sizePersons, &procTimeH, &procTimeS, &sailDurationR, &pierReturnTime, &pierCapacity);
+	int sizePersons, procTimeH, procTimeS, sailDuration, pierReturnTime, pierCapacity;
+	int error = loadArgs(argc, argv, &sizePersons, &procTimeH, &procTimeS, &sailDuration, &pierReturnTime, &pierCapacity);
 	if (error)	return ERROR;
 	//spracovanie argumentov
-
 	initialize();
-
-	int hackers = 0;
-	int serfs = 0;
+	
+	sem_t *unboarding = sem_open(semUNBOARDING, O_RDWR);
+	sem_t *cruise = sem_open(semCRUISE, O_RDWR);
 	int pid;
 	pid_t generator;
-	pid_t personGenerator;
 
 	if((pid = fork()) < 0)
 	{	//error
@@ -291,12 +403,6 @@ int main(int argc, char *argv[])
 
 	if(pid == 0)
 	{	//child
-		processPier(sailDurationR, minimalPierCapacity);
-		exit(0);
-	}
-	else 
-	{	//parent
-		generator = pid;
 		if( (pid = fork()) < 0)
 		{
 			perror("fork: ");
@@ -304,27 +410,25 @@ int main(int argc, char *argv[])
 		}
 		if(pid == 0)
 		{
-			if((pid = fork()) < 0)
-			{
-				perror("fork: ");
-				exit(0);
-			}
-			if(pid == 0)
-			{
-				generateHackers(sizePersons, procTimeH);
-				exit(0);
-			}
-			else
-				generateSerfs(sizePersons, procTimeS);
-				exit(0);
+			generateProcess(sizePersons, procTimeH, "HACK", sailDuration, pierReturnTime);
+			exit(0);
 		}
 		else
-			personGenerator = pid;
-	
+		{
+			generateProcess(sizePersons, procTimeS, "SERF", sailDuration, pierReturnTime);
+			exit(0);
+		}
 	}
+	else 	//parent
+		generator = pid;
+
+	sem_wait(cruise);
+	for(int i = 0; i < boatCapacity; i++){sem_post(unboarding);}
+
+	sem_close(cruise);
+	sem_close(unboarding);
 	
 	waitpid(generator, NULL, 0);
-	waitpid(personGenerator, NULL, 0);
 
 	cleanup();
 
